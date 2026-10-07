@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Malmoi 말모이 — Korean vocabulary for advanced learners</title>
+  <meta name="description" content="Look up Korean words in context, learn slang, and practice by texting. Built for fluent learners.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='4' y='4' width='56' height='56' rx='6' fill='%23B63A2C'/><text x='32' y='44' font-size='34' text-anchor='middle' fill='white' font-family='serif'>말</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <a class="brand" href="#home" id="brand-home" aria-label="Malmoi home">
+      <span class="wongoji brand-cells" aria-hidden="true"><span>말</span><span>모</span><span>이</span></span>
+      <span class="brand-text">
+        <span class="brand-name">Malmoi</span>
+        <span class="brand-sub">Korean words, gathered one by one</span>
+      </span>
+    </a>
+
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button role="tab" id="tab-btn-ask" aria-controls="tab-ask" aria-selected="true" data-tab="ask">Ask</button>
+      <button role="tab" id="tab-btn-drill" aria-controls="tab-drill" aria-selected="false" data-tab="drill">Text drill</button>
+      <button role="tab" id="tab-btn-bank" aria-controls="tab-bank" aria-selected="false" data-tab="bank">Word bank <span class="tab-count" id="bank-count"></span></button>
+      <button role="tab" id="tab-btn-explore" aria-controls="tab-explore" aria-selected="false" data-tab="explore">Explore</button>
+    </nav>
+
+    <label class="switch" title="Show romanization above Korean words">
+      <input type="checkbox" id="roman-toggle" checked>
+      <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+      <span class="switch-label">Romanization</span>
+    </label>
+  </header>
+
+  <div class="notice" id="setup-notice" hidden></div>
+
+  <main id="main">
+    <!-- ============================== HOME ============================== -->
+    <section class="panel" id="tab-home" aria-label="Home" hidden>
+      <div class="home">
+        <div class="home-hero">
+          <div class="hero-text">
+            <h1>Learn Korean words a <span class="nowrap">one-word</span> translation can't explain.</h1>
+            <p class="lede">Malmoi is for people who already speak Korean but keep running into words they only half-know.
+              Look a word up in the sentence you found it in, keep it in your own word bank, and practice it by texting
+              until it sticks.</p>
+            <div class="hero-actions">
+              <button class="btn primary" data-goto="ask">Look up a word</button>
+              <button class="btn" data-goto="drill">Start a text drill</button>
+            </div>
+          </div>
+          <figure class="sheet" aria-label="Example of a saved word">
+            <div class="sheet-word">
+              <span class="wongoji sheet-cells" aria-hidden="true"><span>눈</span><span>치</span></span>
+              <span class="seal" data-noroman aria-hidden="true">익힘</span>
+            </div>
+            <div class="sheet-rom">nunchi</div>
+            <p class="sheet-gloss">The knack for reading a situation and picking up on what people aren't saying.</p>
+            <p class="sheet-seen" lang="ko" data-noroman>걔는 <mark>눈치</mark>가 없어서 그 얘기를 또 꺼냈어</p>
+            <figcaption>Each word is saved with the sentence you found it in, then stamped once you've mastered it.</figcaption>
+          </figure>
+        </div>
+
+        <div class="progress" id="home-progress" aria-live="polite"></div>
+
+        <h2 class="home-h2">What you can do</h2>
+        <div class="home-nav">
+          <button class="nav-card" data-goto="ask">
+            <span class="nav-ko" lang="ko" data-noroman>물어보기</span>
+            <span class="nav-title">Ask</span>
+            <span class="nav-desc">Look up a word in the sentence you saw it in, ask how to say something in Korean, decode slang, or paste an article to pull out the words worth learning.</span>
+          </button>
+          <button class="nav-card" data-goto="drill">
+            <span class="nav-ko" lang="ko" data-noroman>문자 연습</span>
+            <span class="nav-title">Text drill</span>
+            <span class="nav-desc">Text a friend, coworker, or boss. The situation calls for a hidden word, and Malmoi checks whether you used it at the right politeness level.</span>
+          </button>
+          <button class="nav-card" data-goto="bank">
+            <span class="nav-ko" lang="ko" data-noroman>단어장</span>
+            <span class="nav-title">Word bank</span>
+            <span class="nav-desc">Every word you've looked up, with the sentence you found it in and how well you know it. Export to Anki anytime.</span>
+          </button>
+          <button class="nav-card" data-goto="explore">
+            <span class="nav-ko" lang="ko" data-noroman>둘러보기</span>
+            <span class="nav-title">Explore</span>
+            <span class="nav-desc">Browse vocabulary by topic, like finance, dating, the workplace, or internet slang, at the level that fits you.</span>
+          </button>
+        </div>
+
+        <h2 class="home-h2">How it works</h2>
+        <ol class="steps">
+          <li><strong>Look it up where you found it.</strong> Paste the sentence, not just the word. Dictionaries list many senses; Malmoi explains the one in front of you.</li>
+          <li><strong>It's saved automatically.</strong> The word goes into your word bank along with that sentence, so you remember where it came from.</li>
+          <li><strong>Practice until it's stamped.</strong> Text drills bring words back on a review schedule. Get one right enough times and it earns the 익힘 (mastered) seal.</li>
+        </ol>
+
+        <div class="home-notes">
+          <section>
+            <h3>Why “Malmoi”?</h3>
+            <p><span lang="ko">말모이</span> means “gathering words.” It was the name of the first modern Korean dictionary manuscript, compiled word by word in the 1910s. This app does the same thing, one learner at a time.</p>
+          </section>
+          <section>
+            <h3>Where the answers come from</h3>
+            <p>Definitions come from the National Institute of Korean Language's Basic Korean Dictionary. Slang and rare words come from a live web search and are labeled “Web-sourced” with links. Anything that couldn't be checked against a dictionary is marked as unverified.</p>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== ASK ============================== -->
+    <section class="panel" id="tab-ask" role="tabpanel" aria-labelledby="tab-btn-ask">
+      <div class="ask">
+        <div class="log" id="ask-log" aria-live="polite">
+          <div class="intro" id="ask-intro">
+            <h1>Look up the word you just ran into.</h1>
+            <p>Paste the sentence you found it in. Malmoi checks the National Institute of Korean Language
+              dictionaries, explains the exact sense being used, and saves the word to your word bank.
+              Slang gets a live web search and a popularity chart.</p>
+            <div class="samples" id="samples">
+              <button class="sample" data-q="What does 눈치 mean in this sentence: &quot;걔는 눈치가 없어서 그 얘기를 또 꺼냈어&quot;?">눈치 in context</button>
+              <button class="sample" data-q="How do I say &quot;awkward&quot; in Korean? I want casual and formal options.">“Awkward” in Korean</button>
+              <button class="sample" data-q="What does 킹받네 mean, and is it still popular?">Slang: 킹받네</button>
+              <button class="sample" data-q="Which sounds more natural: 결정을 내리다 or 결정을 하다?">Which phrasing is natural?</button>
+              <button class="sample" data-q="Break down 경제 into its hanja roots and show me related words.">Hanja roots of 경제</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="ask-tools" id="ask-tools" hidden>
+          <button type="button" class="btn ghost small" id="ask-new">New conversation</button>
+        </div>
+        <form class="composer" id="ask-form" autocomplete="off">
+          <label class="visually-hidden" for="ask-input">Ask about a Korean word</label>
+          <textarea id="ask-input" rows="1" placeholder="Ask about a Korean word or paste a sentence…"></textarea>
+          <button type="submit" class="btn primary" id="ask-send">Ask</button>
+        </form>
+        <p class="composer-hint">Enter to send. Shift + Enter for a new line. Paste a whole Korean article to pull out the words worth learning.</p>
+      </div>
+    </section>
+
+    <!-- ============================== DRILL ============================== -->
+    <section class="panel" id="tab-drill" role="tabpanel" aria-labelledby="tab-btn-drill" hidden>
+      <div class="drill">
+        <aside class="drill-setup">
+          <h2>Text drill</h2>
+          <p class="muted">Practice words from your word bank by texting someone. The word you need is hidden; the situation makes it the natural thing to say.</p>
+
+          <fieldset class="field">
+            <legend>Exercise</legend>
+            <div class="segmented" role="radiogroup" id="drill-mode">
+              <label><input type="radio" name="drill-mode" value="produce" checked><span>Reply in Korean</span></label>
+              <label><input type="radio" name="drill-mode" value="recognize"><span>Explain in English</span></label>
+            </div>
+            <p class="field-help" id="drill-mode-help">You get a situation in English and reply in Korean using the hidden word.</p>
+          </fieldset>
+
+          <div class="field">
+            <label for="drill-persona">Who you're texting</label>
+            <select id="drill-persona">
+              <option value="close friend">Close friend (반말)</option>
+              <option value="coworker">Coworker (해요체)</option>
+              <option value="boss">Team lead (합쇼체 / 해요체)</option>
+              <option value="older relative">Aunt (해요체)</option>
+              <option value="crush">Someone you're talking to (해요체)</option>
+              <option value="stranger">Marketplace seller (해요체)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="drill-source">Words from</label>
+            <select id="drill-source">
+              <option value="word_bank">My word bank (due for review first)</option>
+              <option value="topic">A topic</option>
+              <option value="random">Random useful words</option>
+            </select>
+          </div>
+
+          <div class="field" id="drill-topic-field" hidden>
+            <label for="drill-topic">Topic</label>
+            <select id="drill-topic"></select>
+          </div>
+
+          <div class="field" id="drill-level-field" hidden>
+            <label for="drill-level">Level</label>
+            <select id="drill-level">
+              <option value="upper-intermediate">Upper-intermediate</option>
+              <option value="advanced" selected>Advanced</option>
+              <option value="native-level">Native-level</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="drill-word">Or practice one specific word <span class="muted">(optional)</span></label>
+            <input id="drill-word" type="text" placeholder="e.g. 서운하다" lang="ko">
+          </div>
+
+          <button class="btn primary wide" id="drill-start">Start drill</button>
+          <p class="field-help" id="drill-source-help">If your word bank is empty, Malmoi picks a useful word for you.</p>
+        </aside>
+
+        <div class="phone" aria-label="Text conversation">
+          <div class="phone-head">
+            <span class="avatar" id="phone-avatar" aria-hidden="true">?</span>
+            <div>
+              <div class="phone-name" id="phone-name" data-noroman>No conversation yet</div>
+              <div class="phone-rel" id="phone-rel">Start a drill to begin</div>
+            </div>
+            <span class="level-chip" id="phone-level" hidden></span>
+          </div>
+          <div class="task" id="drill-task" hidden>
+            <div class="task-label">Your task</div>
+            <p class="task-text" id="drill-task-text"></p>
+            <p class="task-situation" id="drill-situation"></p>
+          </div>
+          <div class="thread" id="drill-thread" aria-live="polite">
+            <p class="thread-empty">Pick who you're texting, then press <strong>Start drill</strong>.</p>
+          </div>
+          <form class="phone-compose" id="drill-form" autocomplete="off">
+            <label class="visually-hidden" for="drill-input">Your reply</label>
+            <input id="drill-input" type="text" placeholder="Type your reply…" disabled>
+            <button type="submit" class="send-round" id="drill-send" disabled aria-label="Send">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12l15-7-5 15-2.5-6.5z" fill="currentColor"/></svg>
+            </button>
+          </form>
+          <div class="phone-actions">
+            <button class="btn ghost small" id="drill-hint" disabled>Hint</button>
+            <button class="btn ghost small" id="drill-reveal" disabled>Show answer</button>
+            <button class="btn ghost small" id="drill-next" disabled>Next word</button>
+          </div>
+        </div>
+
+        <aside class="coach" aria-live="polite">
+          <h2>Coach</h2>
+          <div id="coach-body"><p class="muted">Feedback on your replies shows up here: whether you used the word, whether your speech level fits the relationship, and a more natural way to say it.</p></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============================== BANK ============================== -->
+    <section class="panel" id="tab-bank" role="tabpanel" aria-labelledby="tab-btn-bank" hidden>
+      <div class="bank">
+        <div class="bank-head">
+          <div>
+            <h2>Your word bank</h2>
+            <p class="muted">Every word you look up is saved here with the sentence you found it in.</p>
+          </div>
+          <div class="stats" id="bank-stats"></div>
+        </div>
+
+        <div class="bank-tools">
+          <div class="segmented compact" role="radiogroup" id="bank-view">
+            <label><input type="radio" name="bank-view" value="recent" checked><span>Recent</span></label>
+            <label><input type="radio" name="bank-view" value="due"><span>Due</span></label>
+            <label><input type="radio" name="bank-view" value="starred"><span>Starred</span></label>
+            <label><input type="radio" name="bank-view" value="struggling"><span>Struggling</span></label>
+            <label><input type="radio" name="bank-view" value="mastered"><span>Mastered</span></label>
+            <label><input type="radio" name="bank-view" value="alphabetical"><span>가–힣</span></label>
+          </div>
+          <input type="search" id="bank-search" placeholder="Search Korean, English, or romanization" aria-label="Search your word bank">
+          <div class="bank-actions">
+            <button class="btn small" id="bank-practice">Practice due words</button>
+            <a class="btn ghost small" href="/api/export.apkg" download>Export to Anki</a>
+            <a class="btn ghost small" href="/api/export.csv" download>Export CSV</a>
+          </div>
+        </div>
+        <p class="storage-note" id="storage-note" hidden></p>
+        <ul class="word-list" id="word-list"></ul>
+      </div>
+    </section>
+
+    <!-- ============================== EXPLORE ============================== -->
+    <section class="panel" id="tab-explore" role="tabpanel" aria-labelledby="tab-btn-explore" hidden>
+      <div class="explore">
+        <div class="explore-head">
+          <div>
+            <h2>Explore by topic</h2>
+            <p class="muted">Vocabulary you'd need to follow real conversations and news on a topic. Every word is checked against the dictionary, and words already in your bank are skipped.</p>
+          </div>
+          <div class="segmented compact" role="radiogroup" id="explore-level">
+            <label><input type="radio" name="explore-level" value="upper-intermediate"><span>Upper-intermediate</span></label>
+            <label><input type="radio" name="explore-level" value="advanced" checked><span>Advanced</span></label>
+            <label><input type="radio" name="explore-level" value="native-level"><span>Native-level</span></label>
+          </div>
+        </div>
+        <div class="topics" id="topics"></div>
+        <form class="topic-custom" id="topic-form" autocomplete="off">
+          <label class="visually-hidden" for="topic-input">Custom topic</label>
+          <input id="topic-input" type="text" placeholder="Or type any topic: K-drama dialogue, real estate, hospital visits…">
+          <button class="btn primary" type="submit">Explore</button>
+        </form>
+        <div id="explore-results" aria-live="polite"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
