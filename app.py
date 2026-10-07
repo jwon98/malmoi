@@ -30,10 +30,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from malmoi import config, dictionaries, korean
+from malmoi import config, korean, llm
 from malmoi.agent import reveal_drill_answer, run_turn
 from malmoi.storage import store, warm_up
-from malmoi.tools import LEVEL_GUIDE, ToolContext, hanja_family, lookup_word, topic_pool
+from malmoi.tools import LEVEL_GUIDE, ToolContext, lookup_word, prefetch_drill, topic_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("malmoi")
@@ -78,16 +78,24 @@ def healthz() -> dict:
 
 # --- Chat (same response shape as the course starter) ------------------------------------
 
+class ChatAction(BaseModel):
+    """A button that maps to exactly one tool (see agent.run_turn)."""
+    tool: str
+    args: dict = Field(default_factory=dict)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=6000)
     session_id: str | None = None
     mode: str = "ask"  # ask | drill | explore
+    action: ChatAction | None = None
 
 
 @app.post("/chat")
 def chat(body: ChatRequest, request: Request) -> dict:
     session_id = body.session_id if body.session_id and SESSION_RE.match(body.session_id) else None
-    result = run_turn(body.message.strip(), session_id, current_user(request), body.mode)
+    result = run_turn(body.message.strip(), session_id, current_user(request), body.mode,
+                      action=body.action.model_dump() if body.action else None)
     # Exactly the starter's shape: response, session_id, tool_calls[{name, args, result}]
     return {"response": result["response"], "session_id": result["session_id"], "tool_calls": result["tool_calls"]}
 
@@ -103,7 +111,8 @@ def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
 
     def worker() -> None:
         try:
-            result = run_turn(body.message.strip(), session_id, user, body.mode, on_event=events.put)
+            result = run_turn(body.message.strip(), session_id, user, body.mode, on_event=events.put,
+                              action=body.action.model_dump() if body.action else None)
             events.put({"type": "done", "response": result["response"], "session_id": result["session_id"],
                         "tool_calls": result["tool_calls"]})
         except Exception as exc:  # noqa: BLE001
@@ -144,35 +153,44 @@ def drill_reveal(body: RevealRequest, request: Request) -> dict:
 class WarmRequest(BaseModel):
     level: str = "advanced"
     topics: list[str] = Field(default_factory=list, max_length=16)
+    samples: list[str] = Field(default_factory=list, max_length=8)
 
 
 _warming: set[str] = set()
 _warm_lock = threading.Lock()
-_warm_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="warm")
+_warm_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="warm")
+
+
+def _in_background(fn, *args):
+    """Run fn as low-priority work: its Gemini calls yield to anything a user clicked."""
+    llm.BACKGROUND.set(True)
+    return fn(*args)
 
 
 @app.post("/api/warm")
 def warm(body: WarmRequest) -> dict:
-    """Pre-build the Explore topic pools (and a few sample answers) so clicking a
-    topic is instant. The browser calls this when the site opens. Results are
-    cached in Firestore for 14 days, so after the first time this returns quickly.
-    The request stays open while it works, which keeps Cloud Run's CPU allocated."""
+    """Pre-build the Explore topic pools for one level, and the answers to the
+    sample questions, so clicking them is fast. The browser calls this for each
+    level when the site opens. Results are cached in Firestore for 60 days, so
+    after the first time this only reads the cache. The request stays open while
+    it works, which keeps Cloud Run's CPU allocated."""
     level = body.level if body.level in LEVEL_GUIDE else "advanced"
     topics = [t.strip()[:80] for t in body.topics if t.strip()]
+    samples = [q.strip()[:500] for q in body.samples if q.strip()]
     with _warm_lock:
         if level in _warming:
             return {"status": "already warming", "level": level}
         _warming.add(level)
     t0 = time.time()
     try:
-        jobs = [_warm_pool.submit(topic_pool, t, level, None, True) for t in topics]
-        if level == "advanced":  # the sample queries on the Ask tab
-            jobs.append(_warm_pool.submit(hanja_family, ToolContext(user="warmup"), "경제"))
-            jobs.append(_warm_pool.submit(dictionaries.lookup, "눈치"))
+        jobs = [_warm_pool.submit(_in_background, topic_pool, t, level, None, True) for t in topics]
+        # Sample answers: running each through the agent once stores the finished
+        # answer in the answer cache (see agent.run_turn).
+        jobs += [_warm_pool.submit(_in_background, run_turn, q, None, "warmup", "ask") for q in samples]
         ready = 0
         for job in jobs:
             try:
-                job.result(timeout=240)
+                job.result(timeout=280)
                 ready += 1
             except Exception as exc:  # noqa: BLE001
                 log.info("warm-up item failed: %s", exc)
@@ -181,6 +199,27 @@ def warm(body: WarmRequest) -> dict:
     finally:
         with _warm_lock:
             _warming.discard(level)
+
+
+class PrefetchRequest(BaseModel):
+    mode: str = "produce"
+    persona: str = "close friend"
+    source: str = "word_bank"
+    topic: str = ""
+    level: str = "advanced"
+    session_id: str | None = None
+
+
+@app.post("/api/drill/prefetch")
+def drill_prefetch(body: PrefetchRequest, request: Request) -> dict:
+    """Write a drill for these settings ahead of time so "Start drill" and "Next
+    word" are nearly instant. The browser calls this without waiting on it."""
+    recent: list[str] = []
+    if body.session_id and SESSION_RE.match(body.session_id):
+        data = store.load_session(body.session_id) or {}
+        recent = list((data.get("state") or {}).get("recent_drill_words", []))
+    ready = prefetch_drill(current_user(request), recent, body.mode, body.persona, body.source, body.topic, body.level)
+    return {"ready": ready}
 
 
 # --- Status ----------------------------------------------------------------------------------

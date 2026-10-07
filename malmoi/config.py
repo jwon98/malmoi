@@ -30,6 +30,8 @@ GOOGLE_CLOUD_LOCATION = _env("GOOGLE_CLOUD_LOCATION", "global")
 # minimal | low | medium | high; "off" sends no setting (use for older models).
 GEMINI_THINKING = _env("GEMINI_THINKING", "low").lower()            # the agent loop
 GEMINI_TOOL_THINKING = _env("GEMINI_TOOL_THINKING", "minimal").lower()  # JSON calls inside tools
+# Max Gemini requests in flight at once per server instance (helps avoid 429s).
+GEMINI_MAX_CONCURRENT = int(_env("GEMINI_MAX_CONCURRENT", "6"))
 
 # --- National Institute of Korean Language (국립국어원) dictionaries -----------
 KRDICT_API_KEY = _env("KRDICT_API_KEY")      # 한국어기초사전 (learner's dictionary, has English)

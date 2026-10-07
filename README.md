@@ -68,21 +68,21 @@ Browser (static/)  ──POST /chat {message, session_id, mode}──▶  app.py
 - **Romanization** is computed in code, never by the model. It follows pronunciation, not spelling (국물 → *gungmul*, 신라 → *silla*, 같이 → *gachi*), using the dictionary's pronunciation when available and common sound-change rules otherwise.
 - **Audio** uses Google Cloud Text-to-Speech, falling back to the browser's Korean voice.
 
-### Speed
+### Speed and rate limits
 
-Most of the wait in an agent app is sequential model calls, so Malmoi keeps them few and short:
+Most of the wait in an agent app is sequential model calls, so Malmoi keeps them few, short, and reliable:
 
-- **Lower thinking depth.** The agent loop uses `thinking_level=low`; simple JSON generation inside tools uses `minimal`; grading uses `low`. If a model doesn't accept a level, the app falls back automatically.
-- **Terminal tools.** In the drill and Explore tabs, the tool result *is* the answer, so the turn ends right after the tool instead of making another "write a reply" model call.
-- **Parallel tools.** When the model asks for several independent tools at once (e.g. looking up two words to compare), they run concurrently.
-- **Pre-generation.** While you work on a drill, the next one is written in the background, so "Next word" is nearly instant. The hint is generated with the scenario, and "Show answer" uses a direct endpoint with no model call.
+- **Rate-limit handling.** Gemini on Vertex AI returns 429 (`RESOURCE_EXHAUSTED`) when requests arrive faster than the quota allows or shared capacity is busy. Every Gemini call retries with exponential backoff and jitter (up to ~15 s for what the user clicked), at most `GEMINI_MAX_CONCURRENT` calls run at once per instance, and background work is limited to 2 concurrent calls and pauses after any 429, so it never crowds out the user.
+- **Typed questions go through the agent; single-tool buttons don't.** In Ask, the model reads the message and chooses tools. Buttons that map to exactly one tool (Start drill, sending a drill reply, picking an Explore topic) call that tool directly via the `action` field on `/chat`, skipping a model round trip that involved no judgment. The response keeps the same `/chat` shape, and the tool call is still shown. Grading a drill reply still uses Gemini to judge meaning.
+- **Answer cache.** The first question in a new Ask conversation is cached with the tool calls the model chose and the answer it wrote (60 days). When anyone asks the same thing again, such as the sample questions or the README queries, the tools run again (so the word is saved to that user's word bank) but both model calls are skipped. Only tools that don't depend on who's asking are cached.
+- **Warm-up.** When the site opens, the browser calls `/api/warm` once per level (Advanced first). It builds the word pool for every Explore topic and runs the sample questions through the agent at low priority, filling the caches above. Results are stored in Firestore (collection `cache`) for 60 days and shared across Cloud Run instances, so later visits only read the cache.
+- **Drill prefetch.** Opening the drill tab, changing drill settings, or starting a drill asks `/api/drill/prefetch` to write the next drill ahead of time, so Start drill and Next word are usually instant. It builds inside that request rather than a background thread, because Cloud Run only reliably gives CPU to open requests. The hint is written with the scenario, and Show answer uses a direct endpoint with no model call.
+- **Lower thinking depth.** The agent loop uses `thinking_level=low`; JSON generation inside tools uses `minimal`; grading uses `low`. If a model doesn't accept a level, the app falls back automatically.
+- **Terminal tools and parallel tools.** In the drill and Explore tabs the tool result *is* the answer, so no extra "write a reply" call is made. When the model asks for several independent tools at once, they run concurrently.
 - **Live progress.** `/chat/stream` runs the same turn as `/chat` but streams Server-Sent Events: progress (`status`), answer text as it's written (`text`), and Explore cards as they're verified (`partial`). Its final `done` event carries exactly the `/chat` payload. `/chat` itself is unchanged.
-- **Caching shared results.** Anything that doesn't depend on who's asking is cached in memory and in Firestore (collection `cache`), so it survives restarts and is shared across Cloud Run instances: topic word pools (14 days), English → Korean candidates (14 days), hanja breakdowns (30 days), and web-grounded slang explanations (3 days). Dictionary responses are cached in memory. Word banks are never cached or shared.
-- **Pre-built Explore topics.** When the site opens, the browser calls `/api/warm`, which builds the word pool for every Explore topic in the background (on its own worker threads, so it never delays what you click). Clicking a topic then just picks words from the pool. Other levels warm when you select them.
-- **Progressive results.** When a pool does need building (a custom topic, or the first visit ever), it's generated as three smaller parallel requests from different angles, and each batch's cards appear as soon as they're verified.
-- **Streaming text.** The answer text in the Ask tab appears as the model writes it.
+- **Other caches.** English → Korean candidates (14 days), hanja breakdowns (30 days), and web-grounded slang explanations (3 days) are cached in Firestore; dictionary responses in memory. Word banks are never cached or shared.
 
-The server log prints `timing:` lines for every model call and tool, so you can see where time goes.
+The server log prints `timing:` lines for every model call and tool, so you can see where time goes. To avoid the slow first request after Cloud Run scales to zero, run `gcloud run services update malmoi --region=us-central1 --min-instances=1` (about $13/month while on; set it back to `0` afterwards).
 
 ### Limitations
 
@@ -111,6 +111,7 @@ Without dictionary keys the app still runs: definitions come from Gemini and are
 | `GOOGLE_CLOUD_LOCATION` | no (default `global`) | Vertex AI location |
 | `GEMINI_THINKING` | no (default `low`) | Thinking level for the agent loop: `minimal`, `low`, `medium`, `high`, or `off` |
 | `GEMINI_TOOL_THINKING` | no (default `minimal`) | Thinking level for JSON generation inside tools |
+| `GEMINI_MAX_CONCURRENT` | no (default `6`) | Max Gemini requests in flight at once per server instance |
 | `GOOGLE_CLOUD_PROJECT` | no (auto-detected) | GCP project ID |
 | `KRDICT_API_KEY` | recommended | 한국어기초사전 key: https://krdict.korean.go.kr/openApi/openApiInfo |
 | `STDICT_API_KEY` | optional | 표준국어대사전 key: https://stdict.korean.go.kr/openapi/openApiInfo.do |

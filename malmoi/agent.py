@@ -13,8 +13,10 @@ can be recorded for the UI and so tools receive the signed-in user's context.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -23,7 +25,7 @@ from datetime import date
 
 from google.genai import types
 
-from . import config, llm
+from . import cache, config, llm
 from .storage import store
 from .tools import DECLARATIONS, ToolContext, execute
 
@@ -262,9 +264,68 @@ def _call_model(history, cfg, emit) -> types.Content | None:
     return types.Content(role="model", parts=parts) if parts else None
 
 
-def run_turn(message: str, session_id: str | None, user: str, mode: str = "ask", on_event=None) -> dict:
+# --- Answer cache -------------------------------------------------------------------
+# The first question in a new Ask conversation is cached with the tool calls the
+# model chose and the answer it wrote. When anyone asks the same thing again
+# (the sample questions, or the README queries graders paste), the tools run
+# again (so the word is saved to that user's word bank, and results are fresh)
+# but the two model round trips are skipped. Only turns whose tools don't depend
+# on who's asking are cached.
+CACHEABLE_TOOLS = {"lookup_word", "find_korean_words", "search_slang", "hanja_family",
+                   "check_naturalness", "word_trend", "mine_vocabulary"}
+ANSWER_TTL = 60 * cache.DAY
+
+
+def _answer_key(message: str) -> str:
+    norm = re.sub(r"\s+", " ", message.strip().lower())
+    return cache.make_key("answer", config.GEMINI_MODEL, norm)
+
+
+def _run_tools(calls: list[tuple[str, dict]], ctx: ToolContext, available: list[str], mode: str, emit) -> list[dict]:
+    def run_one(name: str, args: dict) -> dict:
+        t1 = time.time()
+        if name in available:
+            result = execute(name, args, ctx)
+        else:
+            result = {"ok": False, "error": f"'{name}' isn't available in {mode} mode.",
+                      "hint": f"Use one of: {', '.join(available)}."}
+        log.info("timing: tool %s %.1fs", name, time.time() - t1)
+        emit({"type": "tool", "name": name, "ok": bool(result.get("ok"))})
+        return {"name": name, "args": args, "result": result}
+
+    for name, args in calls:
+        status = TOOL_STATUS.get(name)
+        if status:
+            emit({"type": "status", "text": status(args)})
+    if len(calls) == 1:
+        return [run_one(*calls[0])]
+    # Independent tool calls (e.g. looking up two words) run in parallel. Each task
+    # gets a copy of this thread's context so priority flags carry over.
+    parent = contextvars.copy_context()
+    return list(_tool_pool.map(lambda c: parent.copy().run(run_one, *c), calls))
+
+
+def _replay(message: str, ctx: ToolContext, available: list[str], emit) -> dict | None:
+    record = cache.get(_answer_key(message))
+    if not record:
+        return None
+    done = _run_tools([(c["name"], c["args"]) for c in record["calls"]], ctx, available, "ask", emit)
+    if not all(d["result"].get("ok") for d in done):
+        return None  # something changed (e.g. a dictionary error): answer normally instead
+    emit({"type": "text", "delta": record["response"]})
+    return {"response": record["response"], "tool_calls": done}
+
+
+def run_turn(message: str, session_id: str | None, user: str, mode: str = "ask", on_event=None,
+             action: dict | None = None) -> dict:
     """One /chat turn. `on_event` (optional) receives progress events for streaming:
-    {"type": "status", "text": ...} and {"type": "tool", "name": ..., "ok": ...}."""
+    {"type": "status", "text": ...} and {"type": "tool", "name": ..., "ok": ...}.
+
+    `action` ({"tool": ..., "args": {...}}) is for interface buttons that map to
+    exactly one tool: starting a drill, grading a drill reply, browsing a topic.
+    Those run the tool directly instead of asking the model which tool to use,
+    which saves a Gemini round trip and involves no judgment. Typed questions
+    always go through the model."""
     emit = on_event or _noop
     mode = mode if mode in MODE_TOOLS else "ask"
     session_id, data, history = _load(session_id, user, mode)
@@ -273,6 +334,17 @@ def run_turn(message: str, session_id: str | None, user: str, mode: str = "ask",
         ctx = ToolContext(user=user, session=data.setdefault("state", {}), session_id=session_id, emit=emit)
         turn_start = len(history)
         history.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+        if action:
+            return _run_action(action, mode, session_id, data, history, turn_start, ctx, emit, turn_t0)
+        if mode == "ask" and turn_start == 0:
+            replayed = _replay(message, ctx, active_tools(mode), emit)
+            if replayed:
+                history.append(types.Content(role="model", parts=[types.Part(text=replayed["response"])]))
+                _save(session_id, data, history)
+                log.info("timing: turn (ask, cached answer) %.1fs", time.time() - turn_t0)
+                return {"response": replayed["response"], "session_id": session_id,
+                        "tool_calls": _json_safe(replayed["tool_calls"])}
         tool_calls: list[dict] = []
         available = active_tools(mode)
         cfg = types.GenerateContentConfig(
@@ -296,28 +368,7 @@ def run_turn(message: str, session_id: str | None, user: str, mode: str = "ask",
                     text = "".join(p.text for p in content.parts if p.text and not p.thought).strip()
                     break
 
-                for call in calls:
-                    status = TOOL_STATUS.get(call.name)
-                    if status:
-                        emit({"type": "status", "text": status(dict(call.args or {}))})
-
-                def run_one(call):
-                    args = dict(call.args or {})
-                    t1 = time.time()
-                    if call.name in available:
-                        result = execute(call.name, args, ctx)
-                    else:
-                        result = {"ok": False, "error": f"'{call.name}' isn't available in {mode} mode.",
-                                  "hint": f"Use one of: {', '.join(available)}."}
-                    log.info("timing: tool %s %.1fs", call.name, time.time() - t1)
-                    emit({"type": "tool", "name": call.name, "ok": bool(result.get("ok"))})
-                    return {"name": call.name, "args": args, "result": result}
-
-                # Independent tool calls (e.g. looking up two words) run in parallel.
-                if len(calls) > 1:
-                    done = list(_tool_pool.map(run_one, calls))
-                else:
-                    done = [run_one(calls[0])]
+                done = _run_tools([(call.name, dict(call.args or {})) for call in calls], ctx, available, mode, emit)
                 tool_calls.extend(done)
                 history.append(types.Content(role="user", parts=[
                     types.Part(function_response=types.FunctionResponse(
@@ -340,7 +391,41 @@ def run_turn(message: str, session_id: str | None, user: str, mode: str = "ask",
         log.info("timing: turn (%s) %.1fs, %d tool call(s)", mode, time.time() - turn_t0, len(tool_calls))
         if not text:
             text = "Here's what I found." if tool_calls else "Could you say a bit more about what you're looking for?"
+        elif (mode == "ask" and turn_start == 0 and tool_calls and len(tool_calls) <= 4
+              and all(c["name"] in CACHEABLE_TOOLS and c["result"].get("ok") for c in tool_calls)):
+            cache.put(_answer_key(message), {
+                "response": text, "calls": [{"name": c["name"], "args": c["args"]} for c in tool_calls],
+            }, ANSWER_TTL)
         return {"response": text, "session_id": session_id, "tool_calls": _json_safe(tool_calls)}
+
+
+DIRECT_ACTIONS = {
+    "drill": {"start_text_drill", "check_drill_answer"},
+    "explore": {"explore_domain"},
+}
+
+
+def _run_action(action, mode, session_id, data, history, turn_start, ctx, emit, turn_t0) -> dict:
+    name = str(action.get("tool", ""))
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    if name not in DIRECT_ACTIONS.get(mode, set()):
+        del history[turn_start:]
+        return {"response": f"'{name}' can't be run directly in {mode} mode.", "session_id": session_id,
+                "tool_calls": []}
+    done = _run_tools([(name, args)], ctx, active_tools(mode), mode, emit)
+    result = done[0]["result"]
+    if result.get("ok"):
+        text = _terminal_text(done[0])
+    else:
+        text = result.get("error", "That didn't work.")
+        if "rate limit" in text.lower() or "busy" in text.lower():
+            text = "Gemini is busy right now. Please try again in a few seconds."
+    # The conversation history records what happened in plain text, so the
+    # session stays coherent if the next message goes through the model.
+    history.append(types.Content(role="model", parts=[types.Part(text=text)]))
+    _save(session_id, data, history)
+    log.info("timing: turn (%s, direct %s) %.1fs", mode, name, time.time() - turn_t0)
+    return {"response": text, "session_id": session_id, "tool_calls": _json_safe(done)}
 
 
 def reveal_drill_answer(session_id: str, user: str) -> dict:

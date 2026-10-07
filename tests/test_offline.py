@@ -99,6 +99,7 @@ def mock_http(monkeypatch):
     dictionaries._cache.clear()
     cache.clear_memory()
     tools._prefetched.clear()
+    llm._background_paused_until = 0.0
 
 
 # ---------------------------------------------------------------- parsers
@@ -359,29 +360,128 @@ def test_stream_endpoint_and_parallel_tools(monkeypatch):
     assert [p.function_response.id for p in parts] == ["c0", "c1"]
 
 
-def test_reveal_endpoint_and_prefetch(monkeypatch):
-    import time as _time
+class NoModel:
+    """Fails the test if the agent asks the model anything."""
+    class models:  # noqa: N801
+        @staticmethod
+        def generate_content(**_):
+            raise AssertionError("the model should not have been called")
+
+        @staticmethod
+        def generate_content_stream(**_):
+            raise AssertionError("the model should not have been called")
+
+
+def test_drill_buttons_run_tools_directly_with_prefetch(monkeypatch):
     import app as app_module
 
     scenario = {"partner_message_ko": "뭐해?", "situation_en": "s", "task_en": "t",
                 "model_answer_ko": "좀 서운했어", "hint_en": "starts with 서"}
-    monkeypatch.setattr(llm, "generate_json", lambda prompt, schema, system=None, thinking=None: dict(scenario))
-    monkeypatch.setattr(tools, "_pick_drill_word", lambda ctx, source, topic, level: ("서운하다", "hurt", "A random useful word"))
-    fake = FakeClient([((("start_text_drill", {"mode": "produce", "source": "random"}),))] * 2)
-    monkeypatch.setattr(llm, "client", lambda: fake)
-    c = TestClient(app_module.app)
-    first = c.post("/chat", json={"message": "Start a new drill.", "mode": "drill"}).json()
-    sid = first["session_id"]
-    assert first["tool_calls"][0]["result"]["answer_key"]["hint_en"] == "starts with 서"  # hint arrives up front
-    for _ in range(50):  # the next drill is pre-generated in the background
-        if sid in tools._prefetched:
-            break
-        _time.sleep(0.05)
-    assert tools._prefetched[sid][0] == "produce|close friend|random||advanced"
+    built = []
 
+    def fake_json(prompt, schema, system=None, thinking=None):
+        if "KakaoTalk" in prompt:
+            built.append(prompt)
+            return dict(scenario)
+        return {"meaning_matches": True, "uses_acceptable_alternative": False, "feedback_en": "Good.",
+                "better_version_ko": "좀 서운했어", "partner_reply_ko": "미안!"}
+
+    monkeypatch.setattr(llm, "generate_json", fake_json)
+    monkeypatch.setattr(tools, "_pick_drill_word", lambda ctx, source, topic, level: ("서운하다", "hurt", "A random useful word"))
+    monkeypatch.setattr(llm, "client", lambda: NoModel())
+    c = TestClient(app_module.app)
+    settings = {"mode": "produce", "persona": "close friend", "source": "random", "topic": "", "level": "advanced"}
+
+    # Written ahead of time...
+    assert c.post("/api/drill/prefetch", json=settings).json() == {"ready": True}
+    assert len(built) == 1
+    # ...so starting the drill uses it: no new scenario, and no model call to pick the tool.
+    first = c.post("/chat", json={"message": "Start a new drill", "mode": "drill",
+                                  "action": {"tool": "start_text_drill", "args": settings}}).json()
+    assert set(first) == {"response", "session_id", "tool_calls"}
+    assert first["tool_calls"][0]["name"] == "start_text_drill" and len(built) == 1
+    assert first["tool_calls"][0]["result"]["answer_key"]["hint_en"] == "starts with 서"
+    sid = first["session_id"]
+
+    answer = c.post("/chat", json={"message": "좀 서운했어", "mode": "drill", "session_id": sid,
+                                   "action": {"tool": "check_drill_answer", "args": {"reply": "좀 서운했어"}}}).json()
+    assert answer["tool_calls"][0]["result"]["verdict"] == "correct"
+
+    # Only tools that map to a button can be run directly.
+    bad = c.post("/chat", json={"message": "x", "mode": "drill", "session_id": sid,
+                                "action": {"tool": "update_word", "args": {"word": "x", "action": "delete"}}}).json()
+    assert bad["tool_calls"] == [] and "can't be run directly" in bad["response"]
+
+    # A new drill to test the instant reveal endpoint.
+    second = c.post("/chat", json={"message": "Start", "mode": "drill", "session_id": sid,
+                                   "action": {"tool": "start_text_drill", "args": settings}}).json()
+    assert second["tool_calls"][0]["result"]["ok"]
     r = c.post("/api/drill/reveal", json={"session_id": sid}).json()
     assert r["verdict"] == "revealed" and r["answer_key"]["target_word"] == "서운하다"
     assert c.post("/api/drill/reveal", json={"session_id": sid}).status_code == 404  # already revealed
+
+
+def test_repeated_first_question_is_answered_from_cache(monkeypatch):
+    import app as app_module
+
+    fake = FakeClient([((("lookup_word", {"word": "눈치"}),)), "**눈치** is reading the room."])
+    monkeypatch.setattr(llm, "client", lambda: fake)
+    c = TestClient(app_module.app)
+    q = "What does 눈치 mean?"
+    first = c.post("/chat", json={"message": q}).json()
+    assert first["response"] == "**눈치** is reading the room."
+
+    # Same question, new conversation, different user: tools run again, the model doesn't.
+    monkeypatch.setattr(llm, "client", lambda: NoModel())
+    second = c.post("/chat", json={"message": "  what does 눈치 mean? "},
+                    headers={"x-goog-authenticated-user-email": "accounts.google.com:other@columbia.edu"}).json()
+    assert second["response"] == first["response"] and second["session_id"] != first["session_id"]
+    assert second["tool_calls"][0]["name"] == "lookup_word" and second["tool_calls"][0]["result"]["ok"]
+    assert tools.store.get_word("other@columbia.edu", "눈치")  # saved to that user's word bank
+
+    # A follow-up in that conversation goes to the model as usual.
+    monkeypatch.setattr(llm, "client", lambda: FakeClient(["Sense 2 is a hint or sign."]))
+    follow = c.post("/chat", json={"message": "and sense 2?", "session_id": second["session_id"]},
+                    headers={"x-goog-authenticated-user-email": "accounts.google.com:other@columbia.edu"}).json()
+    assert follow["response"] == "Sense 2 is a hint or sign."
+
+
+def test_rate_limits_are_retried(monkeypatch):
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            calls.append(1)
+            if len(calls) < 3:
+                err = RuntimeError("429 RESOURCE_EXHAUSTED")
+                err.code = 429
+                raise err
+            return types.GenerateContentResponse(candidates=[types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text='{"ok": true}')]))])
+
+    class C:
+        models = Models()
+
+    monkeypatch.setattr(llm, "client", lambda: C())
+    assert llm.generate_json("x", {"type": "object"}) == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_background_flag_carries_into_worker_threads():
+    seen = []
+
+    def work():
+        seen.append(llm.BACKGROUND.get())
+
+    def run():
+        llm.BACKGROUND.set(True)
+        tools._submit(tools._gen_pool, work).result()
+
+    import contextvars
+    contextvars.copy_context().run(run)
+    tools._submit(tools._gen_pool, work).result()
+    assert seen == [True, False]
 
 
 def test_thinking_level_fallback(monkeypatch):
@@ -472,3 +572,19 @@ def test_explore_streams_batches_and_warm_cache_avoids_gemini(monkeypatch):
     assert {w["word"] for w in out["words"]} == {"눈치", "경제", "망설이다", "없는말"}
     assert any(e["type"] == "partial" for e in events)
     assert out["words"][-1]["verified"] is False  # unverified words come last
+
+
+def test_warm_up_prepares_sample_answers(monkeypatch):
+    import app as app_module
+
+    fake = FakeClient([((("hanja_family", {"word": "경제"}),)), "**경제** comes from 經濟."])
+    monkeypatch.setattr(llm, "client", lambda: fake)
+    monkeypatch.setattr(llm, "generate_json", lambda prompt, schema, system=None, thinking=None: {"roots": []})
+    c = TestClient(app_module.app)
+    sample = "Break down 경제 into its hanja roots and show me related words."
+    r = c.post("/api/warm", json={"level": "advanced", "topics": [], "samples": [sample]}).json()
+    assert r["ready"] == r["total"] == 1
+
+    monkeypatch.setattr(llm, "client", lambda: NoModel())  # now answered without the model
+    out = c.post("/chat", json={"message": sample}).json()
+    assert out["response"] == "**경제** comes from 經濟." and out["tool_calls"][0]["name"] == "hanja_family"

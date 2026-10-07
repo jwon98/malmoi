@@ -239,6 +239,7 @@ function showTab(name, { push = true } = {}) {
   if (push && location.hash !== `#${name}`) history.pushState(null, "", `#${name}`);
   if (name === "bank") loadBank();
   if (name === "home") refreshMe();
+  if (name === "drill" && typeof prefetchDrill === "function" && !drill.active) prefetchDrill();
   window.scrollTo({ top: 0 });
 }
 tabs.forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
@@ -269,9 +270,11 @@ const sessions = { ask: null, drill: null, explore: null };
 /* Runs one agent turn. Uses /chat/stream to receive live progress ("Checking the
    dictionary for 눈치") and falls back to plain /chat if streaming isn't available.
    Either way the result has the same shape: { response, session_id, tool_calls }. */
-async function chat(mode, message, handlers = {}) {
+async function chat(mode, message, handlers = {}, action = null) {
   if (typeof handlers === "function") handlers = { status: handlers };
-  const body = { message, session_id: sessions[mode], mode };
+  // `action` runs one tool directly (buttons like Start drill). Typed questions
+  // leave it null and go through the agent, which decides which tools to use.
+  const body = { message, session_id: sessions[mode], mode, ...(action ? { action } : {}) };
   let res;
   try {
     res = await fetch("/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -692,6 +695,8 @@ function syncDrillSource() {
 }
 drillSource.addEventListener("change", syncDrillSource);
 syncDrillSource();
+["#drill-source", "#drill-topic", "#drill-level", "#drill-persona"].forEach((sel) => $(sel).addEventListener("change", prefetchDrill));
+$$("input[name=drill-mode]").forEach((r) => r.addEventListener("change", prefetchDrill));
 
 $$("input[name=drill-mode]").forEach((r) => r.addEventListener("change", () => {
   $("#drill-mode-help").textContent = r.value === "produce"
@@ -773,7 +778,7 @@ function verdictEl(r) {
   </div>`);
 }
 
-async function drillSend(message, { echo = null } = {}) {
+async function drillSend(message, { echo = null, action = null } = {}) {
   if (drill.busy) return;
   drill.busy = true;
   setDrillControls(drill.active);
@@ -784,7 +789,7 @@ async function drillSend(message, { echo = null } = {}) {
   const status = h('<div class="thinking coach-status"><span class="dots"><span></span><span></span><span></span></span><span class="label">Working on it</span></div>');
   coach.prepend(status);
   try {
-    const data = await chat("drill", message, (t) => setStatus(status, t));
+    const data = await chat("drill", message, (t) => setStatus(status, t), action);
     typing.remove();
     let verdict = null;
     for (const c of data.tool_calls || []) {
@@ -823,16 +828,34 @@ function startDrillUI(r) {
   $("#drill-task-text").textContent = r.task_en;
   $("#drill-situation").textContent = r.situation_en;
   (r.partner_message_ko || "").split(/\n+/).filter(Boolean).forEach((m) => bubble(m, "them"));
+  prefetchDrill(); // write the next one while this one is being answered
+}
+
+/* Ask the server to write a drill for the current settings ahead of time, so
+   "Start drill" and "Next word" find one ready. Fire-and-forget. */
+function drillSettings() {
+  const source = drillSource.value;
+  return {
+    mode: $("input[name=drill-mode]:checked").value,
+    persona: $("#drill-persona").value,
+    source,
+    topic: source === "topic" ? drillTopic.value : "",
+    level: $("#drill-level").value,
+  };
+}
+let prefetchTimer = null;
+function prefetchDrill() {
+  if ($("#drill-word").value.trim()) return; // a specific word is built on demand
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(() => {
+    api("/api/drill/prefetch", { ...drillSettings(), session_id: sessions.drill }).catch(() => {});
+  }, 400);
 }
 
 $("#drill-start").addEventListener("click", () => startDrill());
 $("#drill-next").addEventListener("click", () => startDrill());
 async function startDrill(word) {
-  const mode = $("input[name=drill-mode]:checked").value;
-  const persona = $("#drill-persona").value;
-  const source = drillSource.value;
-  const level = $("#drill-level").value;
-  const topic = source === "topic" ? drillTopic.value : "";
+  const { mode, persona, source, topic, level } = drillSettings();
   const w = (word ?? $("#drill-word").value).trim();
   drill.mode = mode;
   drill.active = false;
@@ -841,7 +864,8 @@ async function startDrill(word) {
   $("#drill-task").hidden = true;
   setPhoneHeader(persona, mode); // show who you're texting right away
   setCoach("", null);
-  await drillSend(`Start a new drill. mode=${mode}; persona=${persona}; source=${source}; topic="${topic}"; level=${level}; word=${w || "(none)"}`);
+  const label = w ? `Start a drill with ${w}` : `Start a new drill (${mode === "produce" ? "reply in Korean" : "explain in English"}, ${persona}, words from ${source.replace("_", " ")})`;
+  await drillSend(label, { action: { tool: "start_text_drill", args: { mode, persona, source, topic, level, word: w } } });
 }
 guardIME(drillInput);
 $("#drill-form").addEventListener("submit", (e) => {
@@ -850,7 +874,7 @@ $("#drill-form").addEventListener("submit", (e) => {
   const v = drillInput.value.trim();
   if (!v || !drill.active) return;
   drillInput.value = "";
-  drillSend(v, { echo: v });
+  drillSend(v, { echo: v, action: { tool: "check_drill_answer", args: { reply: v } } });
 });
 // The hint is written together with the scenario, so it shows instantly.
 $("#drill-hint").addEventListener("click", () => {
@@ -1068,7 +1092,7 @@ async function explore(category, label, { more = false } = {}) {
     const data = await chat("explore", msg, {
       status: (t) => setStatus(wait, t),
       partial: (ev) => { if (ev.tool === "explore_domain") addCards(ev.words || []); },
-    });
+    }, { tool: "explore_domain", args: { category, level, count: 9 } });
     wait.remove();
     const call = (data.tool_calls || []).find((c) => c.name === "explore_domain");
     const result = call && call.result && call.result.ok ? call.result : null;
@@ -1100,13 +1124,22 @@ async function explore(category, label, { more = false } = {}) {
   }
 }
 
-/* Pre-build topic word lists in the background so clicking a topic is instant.
-   The server caches them (Firestore, 14 days), so after the first visit this is quick. */
+/* Pre-build Explore word lists for every level, and the answers to the sample
+   questions, so clicking them is fast. The server caches results in Firestore for
+   60 days, so after the first visit these requests just read the cache. Levels go
+   one at a time, starting with whichever one is selected. */
+const SAMPLES = $$(".sample").map((b) => b.dataset.q);
 const warmed = new Set();
 function warmTopics(level) {
-  if (warmed.has(level)) return;
+  if (warmed.has(level)) return Promise.resolve();
   warmed.add(level);
-  api("/api/warm", { level, topics: TOPICS.map((t) => t[2]) }).catch(() => warmed.delete(level));
+  return api("/api/warm", { level, topics: TOPICS.map((t) => t[2]), samples: level === "advanced" ? SAMPLES : [] })
+    .catch(() => warmed.delete(level));
+}
+async function warmEverything() {
+  const selected = $("input[name=explore-level]:checked").value;
+  const order = ["advanced", selected, "upper-intermediate", "native-level"];
+  for (const level of [...new Set(order)]) await warmTopics(level);
 }
 $$("input[name=explore-level]").forEach((r) => r.addEventListener("change", () => warmTopics(r.value)));
 
@@ -1150,7 +1183,7 @@ function renderHomeProgress(s) {
 /* ------------------------------------------------------------------ init */
 
 showTab(location.hash.slice(1) || store.get("tab", "home"), { push: false });
-warmTopics("advanced");
+warmEverything();
 annotate($("#samples"));
 annotate($(".home-notes"));
 annotate($(".steps"));

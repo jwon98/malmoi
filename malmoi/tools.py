@@ -13,13 +13,14 @@ returned ("generate, then verify").
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import logging
 import random
 import re
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Callable
@@ -34,6 +35,13 @@ _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="dict")
 _gen_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="gen")
 # Background warm-up gets its own workers so it never delays what the user just clicked.
 _warm_gen_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="warmgen")
+
+
+def _submit(executor: ThreadPoolExecutor, fn, *args):
+    """executor.submit that carries over context variables (such as llm.BACKGROUND,
+    which marks warm-up work as low priority) into the worker thread."""
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, fn, *args)
 
 
 def _no_emit(_event: dict) -> None:
@@ -496,7 +504,7 @@ ANGLES = [
     "words from news articles, formal writing, and official settings about it",
     "expressions, idiomatic phrases, and nuanced words natives use about it",
 ]
-POOL_TTL = 14 * cache.DAY
+POOL_TTL = 60 * cache.DAY  # long enough to cover the grading period
 
 
 def _generate_batch(category: str, level: str, angle: str, n: int, avoid: list[str]) -> list[dict]:
@@ -535,7 +543,7 @@ def _grow_pool(category: str, level: str, existing: list[dict], on_batch=None, p
         if on_batch and cards:
             on_batch(cards)
 
-    futures = [(executor or _gen_pool).submit(one, angle) for angle in ANGLES]
+    futures = [_submit(executor or _gen_pool, one, angle) for angle in ANGLES]
     errors = []
     for f in futures:
         try:
@@ -868,61 +876,82 @@ def _build_drill(user: str, recent: list[str], mode: str, persona_key: str, sour
     }
 
 
-# Pre-generated next drills, kept in memory per session (never persisted).
-_prefetched: dict[str, tuple[str, dict]] = {}
-_prefetch_running: set[str] = set()
+# Pre-built drills, kept in memory per user and drill settings (never persisted).
+# The browser asks for one ahead of time (POST /api/drill/prefetch) when the drill
+# tab opens and right after each drill starts, so "Start drill" and "Next word"
+# usually find one ready. Building happens inside that request, not in a
+# background thread: on Cloud Run, CPU is only reliably available while a
+# request is open.
+_prefetched: dict[str, Future] = {}
 _prefetch_lock = threading.Lock()
 
 
-def _prefetch_next(ctx: ToolContext, settings_key: str, args: tuple) -> None:
-    """Write the next drill in the background so "Next word" is nearly instant."""
-    sid = ctx.session_id
-    if not sid:
-        return
+def _settings(mode: str, persona: str, source: str, topic: str, level: str) -> tuple:
+    mode = mode if mode in ("produce", "recognize") else "produce"
+    persona = persona if persona in PERSONAS else "close friend"
+    source = source if source in ("word_bank", "topic", "random") else "word_bank"
+    level = level if level in LEVEL_GUIDE else "advanced"
+    return mode, persona, source, (topic or "").strip()[:80], level
+
+
+def prefetch_drill(user: str, recent: list[str], mode: str, persona: str, source: str, topic: str, level: str) -> bool:
+    """Build one drill for these settings and keep it ready. Returns True when one
+    is ready (already, or after building)."""
+    args = _settings(mode, persona, source, topic, level)
+    key = user + "|" + "|".join(args)
     with _prefetch_lock:
-        if sid in _prefetch_running:
-            return
-        _prefetch_running.add(sid)
-    recent = list(ctx.session.get("recent_drill_words", []))
-
-    def run():
+        if key in _prefetched:
+            fut = _prefetched[key]
+            owner = False
+        else:
+            fut = Future()
+            _prefetched[key] = fut
+            owner = True
+            while len(_prefetched) > 500:
+                _prefetched.pop(next(iter(_prefetched)))
+    if not owner:
         try:
-            built = _build_drill(ctx.user, recent, *args)
-            with _prefetch_lock:
-                _prefetched[sid] = (settings_key, built)
-                if len(_prefetched) > 500:
-                    _prefetched.pop(next(iter(_prefetched)))
-        except Exception as exc:  # noqa: BLE001
-            log.info("Drill prefetch failed (will build on demand): %s", exc)
-        finally:
-            with _prefetch_lock:
-                _prefetch_running.discard(sid)
+            fut.result(timeout=60)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        fut.set_result(_build_drill(user, recent, *args))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.info("Drill prefetch failed (will build on demand): %s", exc)
+        with _prefetch_lock:
+            if _prefetched.get(key) is fut:
+                _prefetched.pop(key, None)
+        fut.set_exception(exc)
+        return False
 
-    threading.Thread(target=run, daemon=True).start()
+
+def _take_prefetched(user: str, args: tuple, avoid: set[str]) -> dict | None:
+    key = user + "|" + "|".join(args)
+    with _prefetch_lock:
+        fut = _prefetched.pop(key, None)
+    if fut is None:
+        return None
+    try:
+        built = fut.result(timeout=30)  # if it's still being written, wait for it instead of starting over
+    except Exception:  # noqa: BLE001
+        return None
+    return None if built["answer_key"]["target_word"] in avoid else built
 
 
 def start_text_drill(ctx: ToolContext, mode: str = "produce", word: str = "", persona: str = "close friend",
                      source: str = "word_bank", topic: str = "", level: str = "advanced") -> dict:
-    mode = mode if mode in ("produce", "recognize") else "produce"
-    persona_key = persona if persona in PERSONAS else "close friend"
-    level = level if level in LEVEL_GUIDE else "advanced"
-    source = source if source in ("word_bank", "topic", "random") else "word_bank"
-    topic = (topic or "").strip()[:80]
+    mode, persona_key, source, topic, level = _settings(mode, persona, source, topic, level)
     word = _norm(word)
     if word.startswith("(") or word.lower() in ("none", "(none)"):
         word = ""
     if word and not korean.has_hangul(word):
         return fail("The drill word must be Korean.", "Pass a Korean word, or leave word empty to pick one automatically.")
     args = (mode, persona_key, source, topic, level)
-    settings_key = "|".join(args)
     recent = list(ctx.session.get("recent_drill_words", []))
 
-    built = None
-    if not word and ctx.session_id:
-        with _prefetch_lock:
-            key, ready = _prefetched.pop(ctx.session_id, (None, None))
-        if key == settings_key and ready and ready["answer_key"]["target_word"] not in recent[-3:]:
-            built = ready
+    built = None if word else _take_prefetched(ctx.user, args, set(recent[-3:]))
     if built is None:
         built = _build_drill(ctx.user, recent, *args, word=word)
 
@@ -932,8 +961,6 @@ def start_text_drill(ctx: ToolContext, mode: str = "produce", word: str = "", pe
                             "expected_level": built["expected_level"], "task_en": built["task_en"],
                             "partner_message_ko": built["partner_message_ko"], "answer_key": built["answer_key"],
                             "attempts": 0, "status": "active", "recorded": False}
-    if not word:
-        _prefetch_next(ctx, settings_key, args)
     return ok(
         **{k: v for k, v in built.items() if k != "expected_level"},
         instructions=("answer_key is hidden from the learner in the UI. Never reveal target_word or model_answer_ko "
